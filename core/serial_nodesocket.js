@@ -16,9 +16,11 @@ limitations under the License.
 Author: Patrick Van Oosterwijck (patrick@silicognition.com)
 **/
 
+var net = require("net");
+
 (function() {
-  if (typeof chrome === 'undefined' || chrome.sockets===undefined) {
-    console.log("No chrome.sockets - serial_socket disabled");
+  if (typeof net === 'undefined' || net.Socket===undefined) {
+    console.log("No net.Socket - serial_nodesocket disabled");
     return;
   }
 
@@ -32,14 +34,16 @@ Author: Patrick Van Oosterwijck (patrick@silicognition.com)
     });
   }
 
-  var connectionInfo;
+  var socket;
   var readListener;
   var connectionDisconnectCallback;
   var connectionReadCallback;
+  var connected = false;
 
   var getPorts = function(callback) {
+    console.log("Socket getPorts, config:", Espruino.Config.SERIAL_TCPIP);
     if (Espruino.Config.SERIAL_TCPIP.trim() != "")
-      callback(['TCP/IP: ' + Espruino.Config.SERIAL_TCPIP]);
+      callback([Espruino.Config.SERIAL_TCPIP]); //['TCP/IP: ' + Espruino.Config.SERIAL_TCPIP]
     else
       callback();
   };
@@ -57,17 +61,31 @@ Author: Patrick Van Oosterwijck (patrick@silicognition.com)
 
     connectionReadCallback = receiveCallback;
     connectionDisconnectCallback = disconnectCallback;
-    chrome.sockets.tcp.create({}, function(createInfo) {
-      chrome.sockets.tcp.connect(createInfo.socketId,
-          host, port, function (result) {
-        if (result < 0) {
-          console.log("Failed to open socket " + host+":"+port);
-          openCallback(undefined);
-        } else {
-          connectionInfo = { socketId: createInfo.socketId };
-          openCallback(connectionInfo);
-        }
-      });
+    socket = new net.Socket();
+    socket.setEncoding('utf8');
+
+    // error callback
+    socket.on('error', function(err) {
+      if (connected) {
+        console.error("SOCKET RECEIVE ERROR:", JSON.stringify(info));
+        connectionDisconnectCallback();
+      } else {
+        console.log("Failed to open socket " + host+":"+port, "Error:", err);
+        openCallback(undefined);
+      }
+      connected = false;
+    });
+
+    // receive callback
+    socket.on('data', function(d) {
+      if (connected && connectionReadCallback !== undefined) {
+        connectionReadCallback(str2ab(d));
+      }
+    });
+
+    socket.connect(port, host, function (result) {
+      connected = true;
+      openCallback({socket:"nodesocket"});
     });
   };
 
@@ -82,34 +100,17 @@ Author: Patrick Van Oosterwijck (patrick@silicognition.com)
 
 
   var closeSerial = function() {
-    if (connectionInfo) {
-      chrome.sockets.tcp.disconnect(connectionInfo.socketId,
-        function () {
-          connectionInfo=null;
-          connectionDisconnectCallback();
-          connectionDisconnectCallback = undefinedl
-      });
+    if (socket) {
+      socket.end();
+      socket = null;
+      connectionDisconnectCallback();
+      connectionDisconnectCallback = undefinedl
     }
   };
 
   var writeSerial = function(data, callback) {
-    chrome.sockets.tcp.send(connectionInfo.socketId, str2ab(data), callback);
+    socket.write(data, callback);
   };
-
-  // ----------------------------------------------------------
-  chrome.sockets.tcp.onReceive.addListener(function(info) {
-    if (info.socketId != connectionInfo.socketId)
-      return;
-    if (connectionReadCallback!==undefined)
-      connectionReadCallback(info.data);
-  });
-
-  chrome.sockets.tcp.onReceiveError.addListener(function(info) {
-    if (info.socketId != connectionInfo.socketId)
-      return;
-    console.error("RECEIVE ERROR:", JSON.stringify(info));
-    connectionDisconnectCallback();
-  });
 
   Espruino.Core.Serial.devices.push({
     "init" : init,

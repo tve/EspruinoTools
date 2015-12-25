@@ -10,7 +10,8 @@ console.log = function() {
 }
 //Parse Arguments
 var args = {
- ports: []
+ ports: [],
+ sockets: []
 };
 
 var isNextValidPort = function(next) {
@@ -32,26 +33,35 @@ for (var i=2;i<process.argv.length;i++) {
    else if (arg=="-q" || arg=="--quiet") args.quiet = true;
    else if (arg=="-c" || arg=="--color") args.color = true;
    else if (arg=="-m" || arg=="--minify") args.minify = true;
-   else if (arg=="-p" || arg=="--port") { 
-     args.ports.push(next); 
+   else if (arg=="-t" || arg=="--terminal") args.terminal = true;
+   else if (arg=="-s" || arg=="--socket") {
+     args.sockets.push(next);
+     var j = (++i) + 1;
+     while (isNextValidPort(process.argv[j])) {
+       args.sockets.push(process.argv[j++]);
+       i++;
+     }
+     if (!isNextValidPort(next)) throw new Error("Expecting a socket argument to -s, --socket");
+   } else if (arg=="-p" || arg=="--port") {
+     args.ports.push(next);
      var j = (++i) + 1;
      while (isNextValidPort(process.argv[j])) {
        args.ports.push(process.argv[j++]);
        i++;
      }
-     if (!isNextValidPort(next)) throw new Error("Expecting a port argument to -p, --port"); 
-   } else if (arg=="-e") { 
-     i++; args.expr = next; 
-     if (!isNextValid(next)) throw new Error("Expecting an expression argument to -e"); 
+     if (!isNextValidPort(next)) throw new Error("Expecting a port argument to -p, --port");
+   } else if (arg=="-e") {
+     i++; args.expr = next;
+     if (!isNextValid(next)) throw new Error("Expecting an expression argument to -e");
    } else if (arg=="-b") {
      i++; args.baudRate = parseInt(next);
-     if (!isNextValid(next) || isNaN(args.baudRate)) throw new Error("Expecting a numeric argument to -b"); 
-   } else if (arg=="-o") { 
-     i++; args.outputJS = next; 
-     if (!isNextValidJS(next)) throw new Error("Expecting a JS filename argument to -o"); 
-   } else if (arg=="-f") { 
-     i++; args.updateFirmware = next; 
-     if (!isNextValid(next)) throw new Error("Expecting a filename argument to -f"); 
+     if (!isNextValid(next) || isNaN(args.baudRate)) throw new Error("Expecting a numeric argument to -b");
+   } else if (arg=="-o") {
+     i++; args.outputJS = next;
+     if (!isNextValidJS(next)) throw new Error("Expecting a JS filename argument to -o");
+   } else if (arg=="-f") {
+     i++; args.updateFirmware = next;
+     if (!isNextValid(next)) throw new Error("Expecting a filename argument to -f");
    } else throw new Error("Unknown Argument '"+arg+"', try --help");
  } else {
    if ("file" in args)
@@ -69,10 +79,15 @@ if (args.color) {
 //this is called after Espruino tools are loaded, and
 //sets up configuration as requested by the command-line options
 function setupConfig(Espruino) {
- if (args.minify) 
+ if (args.minify)
    Espruino.Config.MINIFICATION_LEVEL = "SIMPLE_OPTIMIZATIONS";
  if (args.baudRate && !isNaN(args.baudRate))
    Espruino.Config.BAUD_RATE = args.baudRate;
+ if (args.sockets.length > 0) {
+   // FIXME: allow multiple sockets
+   Espruino.Config.SERIAL_TCPIP = args.sockets[0];
+   args.ports.push(args.sockets[0]);
+ }
 }
 
 //header
@@ -93,7 +108,9 @@ if (args.help) {
   "  -v,--verbose            : Verbose",
   "  -q,--quiet              : Quiet - apart from Espruino output",
   "  -m,--minify             : Minify the code before sending it",
+  "  -t,--terminal           : Act as terminal after uploading files or executing commands",
   "  -p,--port /dev/ttyX     : Specify port(s) to connect to",
+  "  -s,--socket espruino.local : Specify socket to connect to",
   "  -b baudRate             : Set the baud rate of the serial connection",
   "                              No effect when using USB, default: 9600",
   "  -o out.js               : Write the actual JS code sent to Espruino to a file",
@@ -101,7 +118,7 @@ if (args.help) {
   "                              Espruino must be in bootloader mode",
   "  -e command              : Evaluate the given expression on Espruino",
   "                              If no file to upload is specified but you use -e,",
-  "                              Espruino will not be reset", 
+  "                              Espruino will not be reset",
   "",
   "If no file, command, or firmware update is specified, this will act",
   "as a terminal for communicating directly with Espruino. Press Ctrl-C",
@@ -109,7 +126,7 @@ if (args.help) {
   "",
   "Please report bugs via https://github.com/espruino/EspruinoTool/issues",
   ""].
-   forEach(function(l) {log(l);});  
+   forEach(function(l) {log(l);});
  process.exit(1);
 }
 
@@ -118,21 +135,43 @@ function connect(port, exitCallback) {
   if (!args.quiet) log("Connecting to '"+port+"'");
   var currentLine = "";
   var exitTimeout;
+  var hadCtrlC = false;
+  var hadCR = false;
+  var isTerminal = false;
+  process.stdin.setRawMode(true);
   Espruino.Core.Serial.startListening(function(data) {
-   // convert ArrayBuffer to string
-   data = String.fromCharCode.apply(null, new Uint8Array(data));
-   // Now handle...
-   currentLine += data;
-   while (currentLine.indexOf("\n")>=0) {
-     var i = currentLine.indexOf("\n");
-     log(args.espruinoPrefix + currentLine.substr(0,i)+args.espruinoPostfix);
-     currentLine = currentLine.substr(i+1);
-   }
-   // if we're waiting to exit, make sure we wait until nothing has been printed
-   if (exitTimeout && exitCallback) {
-     clearTimeout(exitTimeout);
-     exitTimeout = setTimeout(exitCallback, 500);
-   }   
+    if (!isTerminal) {
+      // convert ArrayBuffer to string
+      data = String.fromCharCode.apply(null, new Uint8Array(data));
+      // Now handle...
+      currentLine += data;
+      while (currentLine.indexOf("\n")>=0) {
+        var i = currentLine.indexOf("\n");
+        log(args.espruinoPrefix + currentLine.substr(0,i)+args.espruinoPostfix);
+        currentLine = currentLine.substr(i+1);
+      }
+    } else {
+      data = new Uint8Array(data);
+      process.stdout.write(String.fromCharCode.apply(null, data));
+      /* If Espruino responds after a Ctrl-C with anything other
+       than a blank prompt, make sure the next Ctrl-C will exit */
+      for (var i=0;i<data.length;i++) {
+        var ch = data[i];
+        if (ch==8) hadCR = true;
+        else {
+          if (hadCtrlC && (ch!=62 /*>*/ || !hadCR)) {
+            //process.stdout.write("\nCTRLC RESET BECAUSE OF "+JSON.stringify(String.fromCharCode.apply(null, data))+"  "+hadCR+" "+ch+"\n");
+            hadCtrlC = false;
+          }
+          hadCR = false;
+        }
+      }
+    }
+    // if we're waiting to exit, make sure we wait until nothing has been printed
+    if (exitTimeout && exitCallback) {
+      clearTimeout(exitTimeout);
+      exitTimeout = setTimeout(exitCallback, 500);
+    }
   });
   Espruino.Core.Serial.open(port, function(status) {
     if (status === undefined) {
@@ -145,10 +184,10 @@ function connect(port, exitCallback) {
     if (args.file) {
       code = fs.readFileSync(args.file, {encoding:"utf8"});
     }
-    if (args.expr) {  
+    if (args.expr) {
       if (code) {
         if (code[code.length-1]!="\n")
-          code += "\n";        
+          code += "\n";
       } else
         Espruino.Config.RESET_BEFORE_SEND = false;
       code += args.expr+"\n";
@@ -161,19 +200,53 @@ function connect(port, exitCallback) {
         exitTimeout = setTimeout(exitCallback, 500);
       });
     }
+
+    // act as terminal
+    var terminal = function() {
+      isTerminal = true;
+      process.stdin.on('readable', function() {
+        var chunk = process.stdin.read();
+        if (chunk !== null) {
+          chunk = chunk.toString();
+          Espruino.Core.Serial.write(chunk);
+          // Check for two Ctrl-C in a row (without Espruino doing anything inbetween)
+          for (var i=0;i<chunk.length;i++) {
+            var ch = chunk.charCodeAt(i);
+            if (ch==3) {
+              if (hadCtrlC) {
+                process.stdout.write("\r\n");
+                exitCallback();
+              } else {
+                setTimeout(function() {
+                  if (hadCtrlC) process.stdout.write("\nPress Ctrl-C again to exit\n>");
+                }, 200);
+              }
+              hadCtrlC = true;
+            }
+          }
+        }
+      });
+
+      process.stdin.on('end', function() {
+        console.log("STDIN ended. exiting...");
+        exitCallback();
+      });
+    };
+
     // send code over here...
     if (code)
       Espruino.callProcessor("transformForEspruino", code, function(code) {
         if (args.outputJS) {
           log("Writing output to "+args.outputJS);
-          require("fs").writeFileSync(args.outputJS, code); 
+          require("fs").writeFileSync(args.outputJS, code);
         }
         Espruino.Core.CodeWriter.writeToEspruino(code, function() {
-          exitTimeout = setTimeout(exitCallback, 500);
-        }); 
+          if (args.terminal) terminal();
+          else exitTimeout = setTimeout(exitCallback, 500);
+        });
       });
-    //
-    // ---------------------- 
+
+    // ----------------------
    }, function() {
      log("Disconnected.");
    });
@@ -192,13 +265,13 @@ function terminal(port, exitCallback) {
      than a blank prompt, make sure the next Ctrl-C will exit */
     for (var i=0;i<data.length;i++) {
       var ch = data[i];
-      if (ch==8) hadCR = true; 
+      if (ch==8) hadCR = true;
       else {
         if (hadCtrlC && (ch!=62 /*>*/ || !hadCR)) {
           //process.stdout.write("\nCTRLC RESET BECAUSE OF "+JSON.stringify(String.fromCharCode.apply(null, data))+"  "+hadCR+" "+ch+"\n");
           hadCtrlC = false;
         }
-        hadCR = false; 
+        hadCR = false;
       }
     }
   });
@@ -226,7 +299,7 @@ function terminal(port, exitCallback) {
               }, 200);
             }
             hadCtrlC = true;
-          }          
+          }
         }
       }
     });
@@ -245,10 +318,10 @@ function terminal(port, exitCallback) {
 function startConnect() {
   if (!args.file && !args.updateFirmware && !args.expr) {
     if (args.ports.length != 1)
-      throw new Error("Can only have one port when using terminal mode");        
+      throw new Error("Can only have one port when using terminal mode");
     terminal(args.ports[0], function() { process.exit(0); });
   } else {
-    //closure for stepping through each port 
+    //closure for stepping through each port
     //and connect + upload (use timeout callback [iterate] for proceeding)
     (function (ports, connect) {
       this.ports = ports;
@@ -258,7 +331,7 @@ function startConnect() {
         (idx>=ports.length?process.exit(0):connect(ports[idx++],iterate));
       }
       iterate();
-    })(args.ports, connect); 
+    })(args.ports, connect);
   }
 }
 
@@ -274,7 +347,7 @@ function main() {
         args.ports = [ports[0]];
         startConnect();
       } else
-        throw new Error("No Ports Found");        
+        throw new Error("No Ports Found");
     });
   } else startConnect();
 }
