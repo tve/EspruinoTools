@@ -204,6 +204,7 @@ function connect(port, exitCallback) {
     // act as terminal
     var terminal = function() {
       isTerminal = true;
+      Espruino.Core.Serial.write("\n"); // get a prompt
       process.stdin.on('readable', function() {
         var chunk = process.stdin.read();
         if (chunk !== null) {
